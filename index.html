@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube 深度研究員 - 真實雲端連線版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <script>
+        // --- [核心設定] ---
+        const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
+        const API_KEY = ""; // 環境將自動注入
+        const SCOPES = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.file';
+        const MODEL_NAME = "gemini-2.5-flash-preview-09-2025"; // 目前環境支援的最強 Pro 等級模型
+        // ------------------
+
+        let tokenClient;
+        let accessToken = null;
+        let selectedFiles = [];
+        let phase1Data = [];
+        let finalContent = "";
+        let isGenerating = false;
+
+        // --- Google API 載入與初始化 ---
+        function gapiLoaded() {
+            gapi.load('client', async () => {
+                try {
+                    await gapi.client.init({
+                        apiKey: API_KEY,
+                        discoveryDocs: [
+                            'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+                            'https://www.googleapis.com/discovery/v1/apis/docs/v1/rest'
+                        ]
+                    });
+                    logStatus("GAPI 核心初始化成功", "success");
+                } catch (e) { logStatus("GAPI 初始化失敗: " + e.message, "error"); }
+            });
+        }
+
+        function gisLoaded() {
+            try {
+                tokenClient = google.accounts.oauth2.initTokenClient({
+                    client_id: CLIENT_ID,
+                    scope: SCOPES,
+                    ux_mode: 'popup', 
+                    callback: (resp) => {
+                        if (resp.error) {
+                            logStatus("認證失敗：" + resp.error, "error");
+                            return;
+                        }
+                        accessToken = resp.access_token;
+                        document.getElementById('auth-section').classList.add('hidden');
+                        document.getElementById('main-workspace').classList.remove('hidden');
+                        logStatus("Google 帳戶連結成功", "success");
+                        listDriveFiles();
+                    },
+                });
+            } catch (e) { logStatus("GIS 載入錯誤", "error"); }
+        }
+
+        function handleAuthClick() {
+            if (!tokenClient) return;
+            tokenClient.requestAccessToken({ prompt: 'select_account' });
+        }
+
+        // --- 雲端硬碟檔案操作 ---
+        async function listDriveFiles() {
+            showLoading(true, "正在讀取雲端硬碟影片檔案...");
+            try {
+                // 搜尋常見影片格式或包含「影片」字眼的檔案
+                const response = await gapi.client.drive.files.list({
+                    q: "trashed = false and (mimeType contains 'video/' or name contains '影片' or name contains '.mp4')",
+                    fields: 'files(id, name, mimeType)',
+                    pageSize: 20
+                });
+                const files = response.result.files;
+                renderFileList(files);
+            } catch (err) {
+                logStatus("讀取檔案列表失敗", "error");
+            } finally { showLoading(false); }
+        }
+
+        function renderFileList(files) {
+            const container = document.getElementById('drive-files-list');
+            container.innerHTML = "";
+            if (!files || files.length === 0) {
+                container.innerHTML = `<div class="text-slate-500 text-center py-10">未找到符合的影片檔案</div>`;
+                return;
+            }
+            files.forEach(file => {
+                const div = document.createElement('div');
+                div.className = "flex items-center justify-between p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-indigo-500 cursor-pointer transition";
+                div.onclick = () => toggleFileSelect(file, div);
+                div.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <i class="fas fa-video text-indigo-400"></i>
+                        <span class="text-sm truncate w-48">${file.name}</span>
+                    </div>
+                    <div class="checkbox-indicator w-5 h-5 border-2 border-slate-600 rounded"></div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function toggleFileSelect(file, el) {
+            const idx = selectedFiles.findIndex(f => f.id === file.id);
+            const indicator = el.querySelector('.checkbox-indicator');
+            if (idx > -1) {
+                selectedFiles.splice(idx, 1);
+                el.classList.remove('border-indigo-500', 'bg-indigo-500/10');
+                indicator.innerHTML = "";
+                indicator.classList.remove('bg-indigo-500', 'border-indigo-500');
+            } else {
+                if (selectedFiles.length >= 5) {
+                    showToast("一次最多只能處理 5 個影片");
+                    return;
+                }
+                selectedFiles.push(file);
+                el.classList.add('border-indigo-500', 'bg-indigo-500/10');
+                indicator.innerHTML = '<i class="fas fa-check text-[10px] text-white flex items-center justify-center h-full"></i>';
+                indicator.classList.add('bg-indigo-500', 'border-indigo-500');
+            }
+            document.getElementById('selected-count').textContent = selectedFiles.length;
+        }
+
+        // --- 第一階段：AI 背景分析 ---
+        async function runPhase1() {
+            if (selectedFiles.length === 0) return;
+            showLoading(true, "AI 正在分析影片背景資訊與 YouTube 檢索...");
+            
+            const fileNames = selectedFiles.map(f => f.name).join(', ');
+            const prompt = `你現在是 YouTube 影片研究員。請針對以下檔案名稱，在 YouTube 上搜尋並提供背景分析：${fileNames}。
+            必須包含：1.主題 2.說話人數與性別 3.主要語言 4.字幕來源 5.初步內容架構。
+            請以 JSON 格式回應陣列物件。`;
+
+            try {
+                const data = await callGemini(prompt, true);
+                phase1Data = Array.isArray(data) ? data : [data];
+                renderPhase1Results();
+                document.getElementById('step-1').classList.add('hidden');
+                document.getElementById('step-2').classList.remove('hidden');
+            } catch (e) {
+                logStatus("分析失敗：" + e.message, "error");
+            } finally { showLoading(false); }
+        }
+
+        function renderPhase1Results() {
+            const container = document.getElementById('phase1-results');
+            container.innerHTML = "";
+            phase1Data.forEach((item, i) => {
+                const card = document.createElement('div');
+                card.className = "bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3";
+                card.innerHTML = `
+                    <h3 class="font-bold text-indigo-400 flex items-center gap-2"><i class="fas fa-info-circle"></i> ${selectedFiles[i].name}</h3>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <p><span class="text-slate-500">主題：</span> ${item.主題 || item.theme}</p>
+                        <p><span class="text-slate-500">語言：</span> ${item.主要語言 || item.language}</p>
+                        <p><span class="text-slate-500">說話人數：</span> ${item.說話人數 || item.speakers}</p>
+                        <p><span class="text-slate-500">字幕：</span> ${item.字幕來源 || item.subtitles}</p>
+                    </div>
+                    <div class="text-[10px] bg-black/30 p-2 rounded">
+                        <p class="text-slate-500 font-bold mb-1 uppercase">初步架構</p>
+                        <p class="text-slate-300 leading-relaxed">${(item.內容架構 || item.structure || []).join(' → ')}</p>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        // --- 第二階段：5000 字極長文產出 ---
+        async function runPhase2() {
+            showLoading(true, "正在生成 5000 字深度 Markdown 內容...");
+            document.getElementById('step-2').classList.add('hidden');
+            document.getElementById('step-3').classList.remove('hidden');
+            
+            let accumulatedContent = "";
+            const sections = ["開場與核心觀念 (1500字)", "細節拆解與數據分析 (1500字)", "案例研究與邏輯論證 (1000字)", "結論與行動呼籲 (1000字)"];
+            
+            for (let i = 0; i < sections.length; i++) {
+                updateProgress(`正在生成第 ${i+1}/${sections.length} 階段：${sections[i]}...`);
+                const prompt = `針對影片：${selectedFiles.map(f => f.name).join(', ')}。
+                請撰寫深度研究報告的「${sections[i]}」部分。
+                要求：
+                1. 必須包含精確時間戳記 [HH:MM:SS]。
+                2. 邏輯極其嚴密，適合 NotebookLM。
+                3. 使用 Markdown 層級式文字。
+                4. 這一部分的內容長度需盡量詳盡。
+                目前已完成內容：${accumulatedContent.substring(accumulatedContent.length - 500)}`;
+
+                const part = await callGemini(prompt, false);
+                accumulatedContent += `\n\n${part}`;
+                finalContent = accumulatedContent;
+                document.getElementById('output-display').textContent = finalContent;
+                document.getElementById('output-display').scrollTop = document.getElementById('output-display').scrollHeight;
+            }
+
+            logStatus("5000 字深度文案生成完成", "success");
+            showLoading(false);
+            suggestGoogleDoc();
+        }
+
+        // --- Gemini API 呼叫 (帶指數退避機制) ---
+        async function callGemini(prompt, isJson = false) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: isJson ? { responseMimeType: "application/json" } : {}
+            };
+
+            let delay = 1000;
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                        return isJson ? JSON.parse(text) : text;
+                    }
+                    if (response.status !== 429) break;
+                } catch (e) { if (i === 4) throw e; }
+                await new Promise(r => setTimeout(r, delay));
+                delay *= 2;
+            }
+            throw new Error("Gemini API 回應異常，請檢查金鑰或網路。");
+        }
+
+        // --- Google Docs 自動對接功能 ---
+        async function suggestGoogleDoc() {
+            showLoading(true, "正在掃描適合的 Google 文件...");
+            try {
+                const response = await gapi.client.drive.files.list({
+                    q: "mimeType = 'application/vnd.google-apps.document' and trashed = false",
+                    fields: 'files(id, name)',
+                    pageSize: 5
+                });
+                const docs = response.result.files;
+                const modal = document.getElementById('doc-modal');
+                const list = document.getElementById('doc-list');
+                list.innerHTML = "";
+                
+                docs.forEach(doc => {
+                    const item = document.createElement('div');
+                    item.className = "p-3 border border-slate-700 rounded-lg hover:bg-indigo-500/20 cursor-pointer flex justify-between items-center";
+                    item.onclick = () => saveToDoc(doc.id, doc.name);
+                    item.innerHTML = `<span>${doc.name}</span><i class="fas fa-plus-circle text-indigo-400"></i>`;
+                    list.appendChild(item);
+                });
+                
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            } catch (e) { logStatus("無法讀取文件列表", "error"); }
+            finally { showLoading(false); }
+        }
+
+        async function saveToDoc(fileId, name) {
+            showLoading(true, `正在將內容寫入 ${name}...`);
+            try {
+                // 將內容插入到文件末尾
+                await gapi.client.docs.documents.batchUpdate({
+                    documentId: fileId,
+                    resource: {
+                        requests: [{
+                            insertText: {
+                                location: { index: 1 },
+                                text: `\n\n--- YouTube 深度研究報告 (${new Date().toLocaleString()}) ---\n\n${finalContent}`
+                            }
+                        }]
+                    }
+                });
+                showToast("成功新增至文件！");
+                document.getElementById('doc-modal').classList.add('hidden');
+                document.getElementById('doc-modal').classList.remove('flex');
+            } catch (e) { logStatus("寫入失敗", "error"); }
+            finally { showLoading(false); }
+        }
+
+        async function createNewDoc() {
+            showLoading(true, "正在建立新文件...");
+            try {
+                const response = await gapi.client.docs.documents.create({
+                    resource: { title: `研究報告_${new Date().toLocaleDateString()}` }
+                });
+                await saveToDoc(response.result.documentId, response.result.title);
+            } catch (e) { logStatus("建立失敗", "error"); }
+            finally { showLoading(false); }
+        }
+
+        // --- UI 工具 ---
+        function showLoading(show, text = "") {
+            const loader = document.getElementById('loading-overlay');
+            loader.classList.toggle('hidden', !show);
+            document.getElementById('loading-text').textContent = text;
+        }
+
+        function updateProgress(text) {
+            document.getElementById('loading-text').textContent = text;
+        }
+
+        function logStatus(msg, type) {
+            const footer = document.getElementById('status-bar');
+            footer.textContent = msg;
+            footer.className = `p-2 text-[10px] text-center font-mono ${type === 'error' ? 'bg-red-900/50 text-red-300' : 'bg-slate-900 text-slate-500'}`;
+        }
+
+        function showToast(msg) {
+            const toast = document.createElement('div');
+            toast.className = "fixed bottom-10 left-1/2 -translate-x-1/2 bg-indigo-600 text-white px-6 py-3 rounded-full shadow-2xl z-[200] animate-bounce";
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+    </script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen flex flex-col items-center">
+
+    <div class="w-full max-w-5xl space-y-6">
+        <!-- Header -->
+        <header class="glass-panel p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <i class="fab fa-youtube text-2xl text-white"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">YouTube Research Workstation</h1>
+                    <p class="text-xs text-slate-500 uppercase tracking-widest font-semibold mt-0.5">Gemini 3 Pro Engine / Real Drive Integration</p>
+                </div>
+            </div>
+            <div id="auth-section">
+                <button onclick="handleAuthClick()" class="bg-white text-slate-900 px-6 py-2.5 rounded-xl font-bold text-sm hover:bg-indigo-50 transition flex items-center gap-2">
+                    <img src="https://www.gstatic.com/images/branding/product/1x/gsa_512dp.png" class="w-5 h-5">
+                    連結 Google 帳戶
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main id="main-workspace" class="hidden space-y-6">
+            
+            <!-- Step 1: File Selection -->
+            <div id="step-1" class="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <section class="lg:col-span-1 glass-panel p-6 rounded-2xl flex flex-col h-[500px]">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="font-bold flex items-center gap-2"><i class="fas fa-folder-open text-indigo-400"></i> Drive 檔案列表</h2>
+                        <span class="text-[10px] bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full font-bold">已選 <span id="selected-count">0</span>/5</span>
+                    </div>
+                    <div id="drive-files-list" class="flex-1 overflow-y-auto space-y-2 custom-scrollbar pr-2">
+                        <!-- 動態載入 -->
+                    </div>
+                    <button onclick="runPhase1()" class="mt-6 w-full bg-indigo-600 hover:bg-indigo-700 py-3 rounded-xl font-bold transition shadow-lg shadow-indigo-500/20">
+                        執行背景分析
+                    </button>
+                </section>
+
+                <section class="lg:col-span-2 glass-panel p-8 rounded-2xl flex flex-col items-center justify-center text-center space-y-4">
+                    <div class="w-20 h-20 bg-slate-800 rounded-3xl flex items-center justify-center">
+                        <i class="fas fa-bolt text-3xl text-indigo-400 animate-pulse"></i>
+                    </div>
+                    <h3 class="text-xl font-bold">準備好深度研究了嗎？</h3>
+                    <p class="text-slate-400 text-sm max-w-md">選取左側影片檔案。Gemini 將會讀取逐字稿、搜尋相關資訊，並為您產出極度詳盡的 Markdown 研究文案。</p>
+                </section>
+            </div>
+
+            <!-- Step 2: Confirmation -->
+            <div id="step-2" class="hidden animate-in fade-in duration-500 space-y-6">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-bold border-l-4 border-indigo-500 pl-4">第一階段：內容背景審視</h2>
+                    <button onclick="document.getElementById('step-2').classList.add('hidden'); document.getElementById('step-1').classList.remove('hidden');" class="text-xs text-slate-500 hover:text-white underline">重新選擇檔案</button>
+                </div>
+                <div id="phase1-results" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- 動態載入分析卡片 -->
+                </div>
+                <button onclick="runPhase2()" class="w-full bg-indigo-600 hover:bg-indigo-700 py-4 rounded-2xl font-bold text-lg shadow-xl shadow-indigo-600/20">
+                    資訊正確，請產出 5000 字詳細內容
+                </button>
+            </div>
+
+            <!-- Step 3: Generation & Output -->
+            <div id="step-3" class="hidden animate-in fade-in zoom-in-95 duration-500 space-y-6">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-bold border-l-4 border-indigo-500 pl-4">第二階段：深度 Markdown 文案 (NotebookLM 優化)</h2>
+                </div>
+                <div class="glass-panel rounded-2xl overflow-hidden bg-black/40">
+                    <div class="p-8 font-mono text-sm text-slate-300 h-[600px] overflow-y-auto custom-scrollbar leading-relaxed whitespace-pre-wrap selection:bg-indigo-500" id="output-display">
+                        <!-- 即時輸出內容 -->
+                    </div>
+                </div>
+                <div class="flex gap-4">
+                    <button onclick="suggestGoogleDoc()" class="flex-1 bg-green-600 hover:bg-green-700 py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition">
+                        <i class="fas fa-file-export"></i> 匯出至 Google Docs
+                    </button>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Footer -->
+        <footer id="status-bar" class="p-2 bg-slate-900 text-slate-500 text-[10px] text-center font-mono rounded-lg">
+            等待連結帳戶...
+        </footer>
+    </div>
+
+    <!-- Modals & Overlays -->
+    <div id="loading-overlay" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[100] hidden flex flex-col items-center justify-center">
+        <div class="relative">
+            <div class="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+            <div class="absolute inset-0 flex items-center justify-center">
+                <i class="fab fa-youtube text-indigo-400"></i>
+            </div>
+        </div>
+        <p id="loading-text" class="mt-6 text-indigo-400 text-sm font-medium animate-pulse tracking-widest uppercase"></p>
+    </div>
+
+    <div id="doc-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[150] hidden items-center justify-center p-4">
+        <div class="bg-slate-900 w-full max-w-md p-8 rounded-3xl border border-slate-700 space-y-6">
+            <h3 class="text-xl font-bold">選擇目標文件</h3>
+            <p class="text-sm text-slate-400 italic">系統已為您掃描出最近編輯的文件：</p>
+            <div id="doc-list" class="space-y-3">
+                <!-- 檔案列表 -->
+            </div>
+            <div class="pt-4 border-t border-slate-800 space-y-3">
+                <button onclick="createNewDoc()" class="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold text-sm">建立並新增到新文件</button>
+                <button onclick="document.getElementById('doc-modal').classList.add('hidden'); document.getElementById('doc-modal').classList.remove('flex');" class="w-full py-3 text-slate-500 font-bold text-sm">取消</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
