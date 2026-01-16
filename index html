@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube 影片研究員 - 專業版 v2.5</title>
+    <title>YouTube 影片研究員 - 專業版 v2.6</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
@@ -13,16 +13,23 @@
         import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- 安全的 Firebase 初始化 ---
+        // --- 安全的 Firebase 初始化守衛 ---
+        let firebaseApp, auth, db;
+        let appId = 'yt-researcher-default';
+
         try {
-            const firebaseConfig = typeof __firebase_config !== 'undefined' 
-                ? JSON.parse(__firebase_config) 
-                : { apiKey: "fallback", authDomain: "fallback", projectId: "fallback" };
+            // 檢查環境變數是否存在
+            const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+            const firebaseConfig = configStr ? JSON.parse(configStr) : { 
+                apiKey: "LOCAL_MODE", 
+                authDomain: "local-mode", 
+                projectId: "local-mode" 
+            };
             
-            const app = initializeApp(firebaseConfig);
-            const auth = getAuth(app);
-            const db = getFirestore(app);
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'yt-researcher-default';
+            firebaseApp = initializeApp(firebaseConfig);
+            auth = getAuth(firebaseApp);
+            db = getFirestore(firebaseApp);
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'yt-researcher-default';
 
             window.db = db;
             window.auth = auth;
@@ -30,27 +37,28 @@
 
             const initAuth = async () => {
                 try {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
+                    const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                    if (token) {
+                        await signInWithCustomToken(auth, token);
                     } else {
                         await signInAnonymously(auth);
                     }
                 } catch (e) {
-                    console.error("Authentication failed:", e);
+                    console.warn("Auth initialization failed, using guest mode.");
                 }
             };
 
             initAuth();
 
             onAuthStateChanged(auth, async (user) => {
-                if (user) {
+                if (user && db) {
                     loadMemory();
                 }
             });
 
             async function loadMemory() {
                 const user = auth.currentUser;
-                if (!user) return;
+                if (!user || !db) return;
                 const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
                 try {
                     const docSnap = await getDoc(docRef);
@@ -63,13 +71,13 @@
 
             window.saveMemory = async (type, folderId) => {
                 const user = auth.currentUser;
-                if (!user || !folderId) return;
+                if (!user || !folderId || !db) return;
                 const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
                 const data = type === 'video' ? { lastVideoFolder: folderId } : { lastTargetFolder: folderId };
                 await setDoc(docRef, data, { merge: true });
             };
         } catch (error) {
-            console.error("Firebase startup error:", error);
+            console.error("Firebase startup avoided or failed. App running in restricted mode.", error);
         }
     </script>
 
@@ -94,8 +102,8 @@
         let pickerApiLoaded = false;
 
         function gapiLoaded() {
-            gapi.load('client:picker', async () => {
-                try {
+            try {
+                gapi.load('client:picker', async () => {
                     await gapi.client.init({
                         apiKey: API_KEY,
                         discoveryDocs: [
@@ -104,8 +112,9 @@
                         ]
                     });
                     pickerApiLoaded = true;
-                } catch (e) { console.error("GAPI 初始化失敗:", e); }
-            });
+                    console.log("GAPI initialized");
+                });
+            } catch (e) { console.error("GAPI load error", e); }
         }
 
         function gisLoaded() {
@@ -125,7 +134,7 @@
                     },
                 });
                 window.tokenClient = tokenClient;
-            } catch (e) { console.error("GIS 載入錯誤:", e); }
+            } catch (e) { console.error("GIS load error", e); }
         }
 
         function handleAuthClick() { 
@@ -170,7 +179,7 @@
                 }));
                 
                 if (data.docs[0] && data.docs[0].parentId) {
-                    window.saveMemory('video', data.docs[0].parentId);
+                    if (window.saveMemory) window.saveMemory('video', data.docs[0].parentId);
                 }
 
                 selectedVideos = [...new Map([...selectedVideos, ...newVideos].map(item => [item.id, item])).values()];
@@ -288,7 +297,7 @@
                 const item = data.docs[0];
                 
                 if (item.mimeType === 'application/vnd.google-apps.folder') {
-                    window.saveMemory('target', item.id);
+                    if (window.saveMemory) window.saveMemory('target', item.id);
                     currentSelectedFolderId = item.id;
                     targetDocId = null;
                     statusEl.innerHTML = `
@@ -302,7 +311,7 @@
                     `;
                     toggleSaveSection(false);
                 } else {
-                    if (item.parentId) window.saveMemory('target', item.parentId);
+                    if (item.parentId && window.saveMemory) window.saveMemory('target', item.parentId);
                     targetDocId = item.id;
                     statusEl.innerHTML = `
                         <div class="bg-emerald-500/5 p-5 rounded-3xl border border-emerald-500/20 w-full text-center">
@@ -370,9 +379,18 @@
         }
 
         function showLoading(show, text="") {
-            document.getElementById('loading-overlay').classList.toggle('hidden', !show);
-            document.getElementById('loading-text').innerText = text;
+            const overlay = document.getElementById('loading-overlay');
+            if (overlay) {
+                overlay.classList.toggle('hidden', !show);
+                document.getElementById('loading-text').innerText = text;
+            }
         }
+
+        // 全域錯誤防護
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            console.error('Caught Global Error:', msg, url, lineNo, columnNo, error);
+            return false;
+        };
     </script>
     <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
     <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
