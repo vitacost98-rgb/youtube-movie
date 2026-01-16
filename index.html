@@ -3,50 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 健康管理儀表板 - 自選資料夾版</title>
+    <title>YouTube 影片研究員 - 檔案選取與自動儲存工具</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
     <script>
-        // --- [重要設定區] ---
+        // --- [Google API 設定] ---
         const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
-        const API_KEY = "AIzaSyBb62hmDSWpb0hA1Oix820GWEBmu4iSQYc"; 
-        const SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.metadata.readonly';
-        // ------------------
+        const API_KEY = ""; 
+        const SCOPES = [
+            'https://www.googleapis.com/auth/drive.readonly',
+            'https://www.googleapis.com/auth/drive.metadata.readonly',
+            'https://www.googleapis.com/auth/documents',
+            'https://www.googleapis.com/auth/drive.file' 
+        ].join(' ');
+        // -------------------------
 
         const PROJECT_NUMBER = CLIENT_ID.split('-')[0];
         let tokenClient;
         let accessToken = null;
-        let calChart;
+        let selectedVideoNames = [];
+        let targetDocId = null;
+        let targetDocName = "";
+        let currentSelectedFolderId = 'root';
 
-        let currentDayData = {
-            date: "",
-            folderId: null,
-            folderName: "",
-            fileId: null,
-            meals: [], // 今日進食清單
-            targets: { cal: 2000, pro: 120, carb: 150, fat: 60 },
-            contexts: { plan: "", note: "", history: "" }
-        };
-
-        // 民國日期格式化 (例如: 115年01月16日)
-        function getROCDateString(dateStr) {
-            const d = new Date(dateStr);
-            const rocYear = d.getFullYear() - 1911;
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const day = String(d.getDate()).padStart(2, '0');
-            return `${rocYear}年${month}月${day}日`;
-        }
-
+        // 初始化 Google API
         function gapiLoaded() {
             gapi.load('client:picker', async () => {
                 try {
                     await gapi.client.init({
                         apiKey: API_KEY,
-                        discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
+                        discoveryDocs: [
+                            'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+                            'https://docs.googleapis.com/$discovery/rest?version=v1'
+                        ]
                     });
-                } catch (e) { console.error("GAPI Error:", e); }
+                } catch (e) { console.error("GAPI 載入失敗:", e); }
             });
         }
 
@@ -59,456 +51,333 @@
                     callback: (resp) => {
                         if (resp.error) return alert("授權失敗");
                         accessToken = resp.access_token;
-                        document.getElementById('auth-btn').innerHTML = `<i class="fas fa-check-circle"></i> 雲端已連線`;
-                        document.getElementById('auth-btn').classList.replace('bg-blue-600', 'bg-emerald-600');
-                        document.getElementById('folder-select-btn').classList.remove('hidden');
+                        document.getElementById('auth-status').innerHTML = `<span class="flex items-center text-emerald-400 font-bold text-xs"><i class="fas fa-check-circle mr-1"></i> 雲端已連線</span>`;
+                        document.querySelectorAll('.auth-required').forEach(el => {
+                            el.disabled = false;
+                            el.classList.remove('opacity-50');
+                        });
                     },
                 });
-            } catch (e) { console.error("GIS Error:", e); }
+            } catch (e) { console.error("GIS 載入失敗:", e); }
         }
 
         function handleAuthClick() {
-            if (!tokenClient) return alert("初始化中...");
+            if (!tokenClient) return alert("系統初始化中，請稍候...");
             tokenClient.requestAccessToken({ prompt: 'select_account' });
         }
 
-        // --- 資料夾與檔案管理邏輯 ---
+        // --- 影片選取功能 ---
 
-        // 選取目標儲存資料夾
-        function pickTargetFolder() {
-            if (!accessToken) return alert("請先連結 Google 帳號");
-            const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
-                .setSelectableMimeTypes('application/vnd.google-apps.folder');
+        function createVideoPicker() {
+            const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+                .setMimeTypes('video/mp4,video/quicktime,video/x-msvideo,application/vnd.google-apps.document,text/plain')
+                .setIncludeFolders(true);
             
             const picker = new google.picker.PickerBuilder()
-                .enableFeature(google.picker.Feature.NAV_HIDDEN)
+                .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
                 .setAppId(PROJECT_NUMBER)
                 .setOAuthToken(accessToken)
                 .addView(view)
-                .setCallback(folderPickerCallback)
+                .setCallback(videoPickerCallback)
                 .build();
             picker.setVisible(true);
         }
 
-        function folderPickerCallback(data) {
+        function videoPickerCallback(data) {
             if (data.action === google.picker.Action.PICKED) {
-                const folder = data.docs[0];
-                currentDayData.folderId = folder.id;
-                currentDayData.folderName = folder.name;
-                document.getElementById('current-folder-display').textContent = `儲存至：${folder.name}`;
-                document.getElementById('current-folder-display').classList.remove('hidden');
-                loadDailyData(); // 選定資料夾後自動讀取今日紀錄
+                const newFiles = data.docs
+                    .filter(doc => doc.mimeType !== 'application/vnd.google-apps.folder')
+                    .map(doc => doc.name);
+                
+                // 採累加方式，並過濾重複
+                selectedVideoNames = [...new Set([...selectedVideoNames, ...newFiles])];
+                renderSelectedList();
             }
         }
 
-        // 讀取特定日期紀錄
-        async function loadDailyData() {
-            const dateStr = document.getElementById('target-date').value;
-            if (!dateStr || !currentDayData.folderId) return;
-            currentDayData.date = dateStr;
-            const rocName = getROCDateString(dateStr) + " 飲食控制紀錄";
-            
-            showLoading(true, `正在資料夾中讀取：${rocName}`);
-            try {
-                const response = await gapi.client.drive.files.list({
-                    q: `name = '${rocName}' and '${currentDayData.folderId}' in parents and trashed = false`,
-                    fields: 'files(id, name)',
-                    spaces: 'drive'
-                });
-                const files = response.result.files;
-                if (files && files.length > 0) {
-                    currentDayData.fileId = files[0].id;
-                    const content = await gapi.client.drive.files.get({ fileId: currentDayData.fileId, alt: 'media' });
-                    const rawContent = content.body;
-                    const dataMatch = rawContent.match(/\[JSON_DATA:(.*)\]/);
-                    if (dataMatch) {
-                        const parsed = JSON.parse(dataMatch[1]);
-                        currentDayData.meals = parsed.meals || [];
-                    } else {
-                        currentDayData.meals = [];
-                    }
-                } else {
-                    currentDayData.fileId = null;
-                    currentDayData.meals = [];
-                }
-                updateUI();
-                renderThinking(`已載入資料夾內的紀錄。目前已有 ${currentDayData.meals.length} 筆進食項目。`);
-            } catch (err) { console.error(err); }
-            finally { showLoading(false); }
+        function removeVideo(index) {
+            selectedVideoNames.splice(index, 1);
+            renderSelectedList();
         }
 
-        // 儲存/更新 民國紀錄檔
-        async function saveDailyData() {
-            if (!accessToken || !currentDayData.folderId) {
-                alert("請先選取目標儲存資料夾");
+        function renderSelectedList() {
+            const container = document.getElementById('selected-files-list');
+            const step2Result = document.getElementById('step-1-result-area');
+            
+            if (selectedVideoNames.length === 0) {
+                container.innerHTML = `<p class="text-[10px] text-slate-500 italic">尚未選取影片</p>`;
+                step2Result.classList.add('hidden');
                 return;
             }
-            const rocName = getROCDateString(currentDayData.date) + " 飲食控制紀錄";
-            const totals = currentDayData.meals.reduce((acc, m) => {
-                acc.cal += m.cal; acc.pro += m.pro; acc.carb += m.carb; acc.fat += m.fat;
-                return acc;
-            }, { cal: 0, pro: 0, carb: 0, fat: 0 });
 
-            let fileBody = `【${rocName}】\n\n`;
-            fileBody += `進食流程：\n`;
-            fileBody += `時間\t食物名稱\t\t熱量(kcal)\t碳水(g)\t蛋白(g)\t脂肪(g)\n`;
-            fileBody += `----------------------------------------------------------------------\n`;
-            currentDayData.meals.forEach(m => {
-                fileBody += `${m.time}\t${m.name.padEnd(16)}\t${Math.round(m.cal)}\t${Math.round(m.carb)}\t${Math.round(m.pro)}\t${Math.round(m.fat)}\n`;
-            });
-            fileBody += `----------------------------------------------------------------------\n`;
-            fileBody += `目前累計小計：\n`;
-            fileBody += `熱量：${Math.round(totals.cal)} kcal\n碳水：${Math.round(totals.carb)} g\n蛋白：${Math.round(totals.pro)} g\n脂肪：${Math.round(totals.fat)} g\n\n`;
-            fileBody += `最後更新於：${new Date().toLocaleString()}\n`;
-            fileBody += `\n\n[JSON_DATA:${JSON.stringify({ meals: currentDayData.meals })}]`;
-
-            try {
-                if (currentDayData.fileId) {
-                    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${currentDayData.fileId}?uploadType=media`, {
-                        method: 'PATCH', headers: { 'Authorization': `Bearer ${accessToken}` }, body: fileBody
-                    });
-                } else {
-                    const metadata = { 
-                        name: rocName, 
-                        mimeType: 'text/plain',
-                        parents: [currentDayData.folderId] 
-                    };
-                    const form = new FormData();
-                    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-                    form.append('file', new Blob([fileBody], { type: 'text/plain' }));
-                    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-                        method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}` }, body: form
-                    });
-                    const resJson = await resp.json();
-                    currentDayData.fileId = resJson.id;
-                }
-                renderThinking(`紀錄已成功更新至資料夾：${currentDayData.folderName}`);
-            } catch (err) { console.error(err); }
+            step2Result.classList.remove('hidden');
+            container.innerHTML = selectedVideoNames.map((name, idx) => `
+                <div class="bg-slate-800/60 p-2 rounded-lg border border-slate-700 text-xs text-slate-300 flex justify-between items-center group">
+                    <span class="truncate pr-2"><i class="fas fa-video mr-2 text-emerald-500/70"></i>${name}</span>
+                    <button onclick="removeVideo(${idx})" class="text-slate-500 hover:text-red-400 transition-colors">
+                        <i class="fas fa-times-circle"></i>
+                    </button>
+                </div>
+            `).join('');
+            document.getElementById('raw-names').value = selectedVideoNames.join('\n');
         }
 
-        // --- 檔案匯入邏輯 (計畫/歷史) ---
-        function triggerLocalFile(type) {
-            const input = document.createElement('input');
-            input.type = 'file'; input.multiple = true;
-            input.accept = '.txt,.html,.pdf,.doc,.docx';
-            input.onchange = (e) => handleLocalFiles(e.target.files, type);
-            input.click();
-        }
+        // --- 目標位置選取與建立功能 ---
 
-        async function handleLocalFiles(files, type) {
-            showLoading(true, "讀取本地文件中...");
-            let totalContent = "";
-            let names = [];
-            for (const file of files) {
-                names.push(file.name);
-                const content = await readFileAsText(file);
-                totalContent += `\n[${file.name}]\n${content}\n`;
-            }
-            currentDayData.contexts[type] = (currentDayData.contexts[type] || "") + totalContent;
-            renderThinking(`已匯入本地脈絡：<b>${names.join(', ')}</b>`);
-            showLoading(false);
-        }
-
-        function createPicker(type) {
-            if (!accessToken) return alert("請先連結 Google");
+        function manualSelectTarget() {
+            // 允許選取文件與資料夾
             const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
-                .setMimeTypes('application/vnd.google-apps.document,text/plain,application/pdf');
+                .setMimeTypes('application/vnd.google-apps.document,application/vnd.google-apps.folder')
+                .setIncludeFolders(true)
+                .setSelectableMimeTypes('application/vnd.google-apps.document,application/vnd.google-apps.folder');
+            
             const picker = new google.picker.PickerBuilder()
-                .enableFeature(google.picker.Feature.NAV_HIDDEN)
-                .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
-                .setAppId(PROJECT_NUMBER).setOAuthToken(accessToken).addView(view)
-                .setCallback((data) => pickerCallback(data, type)).build();
+                .setAppId(PROJECT_NUMBER)
+                .setOAuthToken(accessToken)
+                .addView(view)
+                .setCallback(handleTargetSelection)
+                .build();
             picker.setVisible(true);
         }
 
-        async function pickerCallback(data, type) {
+        async function handleTargetSelection(data) {
             if (data.action === google.picker.Action.PICKED) {
-                showLoading(true, "讀取雲端脈絡...");
-                try {
-                    let totalContent = "";
-                    for (const doc of data.docs) {
-                        let content = "";
-                        if (doc.mimeType === 'application/vnd.google-apps.document') {
-                            const exportUrl = `https://www.googleapis.com/drive/v3/files/${doc.id}/export?mimeType=text/plain`;
-                            const response = await fetch(exportUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-                            content = await response.text();
-                        } else {
-                            const getUrl = `https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media`;
-                            const response = await fetch(getUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-                            content = await response.text();
-                        }
-                        totalContent += `\n[${doc.name}]\n${content}\n`;
-                    }
-                    currentDayData.contexts[type] = (currentDayData.contexts[type] || "") + totalContent;
-                    renderThinking(`已匯入雲端脈絡：${data.docs.length} 個檔案。`);
-                } catch (e) { console.error(e); }
-                finally { showLoading(false); }
+                const item = data.docs[0];
+                const statusEl = document.getElementById('target-status-content');
+                
+                if (item.mimeType === 'application/vnd.google-apps.folder') {
+                    // 選取的是資料夾
+                    currentSelectedFolderId = item.id;
+                    targetDocId = null; // 清空先前選取的文件
+                    
+                    statusEl.innerHTML = `
+                        <div class="bg-blue-500/10 p-4 rounded-xl border border-blue-500/30">
+                            <p class="text-blue-400 text-xs mb-3 font-bold"><i class="fas fa-folder-open mr-2"></i>已選取資料夾：${item.name}</p>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button onclick="triggerCreateDoc()" class="bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded text-[10px] font-bold transition">
+                                    <i class="fas fa-plus-circle mr-1"></i> 新增文件
+                                </button>
+                                <button onclick="triggerCreateFolder()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded text-[10px] font-bold transition">
+                                    <i class="fas fa-folder-plus mr-1"></i> 新增資料夾
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('save-section').classList.add('hidden');
+                } else {
+                    // 選取的是文件
+                    targetDocId = item.id;
+                    targetDocName = item.name;
+                    statusEl.innerHTML = `
+                        <div class="bg-emerald-500/10 p-4 rounded-xl border border-emerald-500/30">
+                            <p class="text-emerald-400 text-xs font-bold"><i class="fas fa-file-alt mr-2"></i>目標文件：${item.name}</p>
+                            <button onclick="manualSelectTarget()" class="mt-2 text-[9px] text-slate-500 hover:text-slate-300 underline">更換位置</button>
+                        </div>
+                    `;
+                    document.getElementById('save-section').classList.remove('hidden');
+                }
             }
         }
 
-        function readFileAsText(file) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                if (file.type.includes("text") || file.type.includes("html")) {
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.readAsText(file);
-                } else {
-                    reader.onload = () => resolve(`[附件檔案: ${file.name}]`);
-                    reader.readAsDataURL(file);
-                }
-            });
-        }
-
-        // --- AI 核心分析 ---
-        async function processIntake() {
-            if (!currentDayData.folderId) return alert("請先選取儲存紀錄的專案資料夾");
-            
-            const foodImg = document.getElementById('food-img').files[0];
-            const mealText = document.getElementById('meal-text-input').value;
-            const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-            
-            showLoading(true, "AI 正在分析進食明細...");
+        async function triggerCreateDoc() {
+            const name = prompt("請輸入新 Google 文件的名稱：", selectedVideoNames[0] ? selectedVideoNames[0] + "_研究報告" : "新 YouTube 研究報告");
+            if (!name) return;
             
             try {
-                const prompt = `你是一位專業營養師。分析本次進食內容。
-                背景參考：${JSON.stringify(currentDayData.contexts)}
-                描述：${mealText}
-                請分解出每一項單獨的食物，並回傳精確 JSON 格式：
-                {"items": [{"name": "食物名", "cal": 數值, "pro": 數值, "carb": 數值, "fat": 數值}], "advice": "專業建議"}`;
-
-                const parts = [{ text: prompt }];
-                if (foodImg) {
-                    const base64 = await toBase64(foodImg);
-                    parts.push({ inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } });
-                }
-
-                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: parts }] })
+                const resp = await gapi.client.drive.files.create({
+                    resource: {
+                        name: name,
+                        mimeType: 'application/vnd.google-apps.document',
+                        parents: [currentSelectedFolderId]
+                    },
+                    fields: 'id, name'
                 });
-                const data = await response.json();
-                const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-                const jsonMatch = text.match(/\{.*\}/s);
+                targetDocId = resp.result.id;
+                targetDocName = resp.result.name;
                 
-                if (jsonMatch) {
-                    const result = JSON.parse(jsonMatch[0]);
-                    result.items.forEach(item => {
-                        currentDayData.meals.push({
-                            time: nowTime,
-                            name: item.name,
-                            cal: item.cal || 0,
-                            pro: item.pro || 0,
-                            carb: item.carb || 0,
-                            fat: item.fat || 0
-                        });
-                    });
-                    updateUI();
-                    renderThinking(`<b>AI 分析建議：</b><br>${result.advice}`);
-                    await saveDailyData(); // 同步至使用者選取的資料夾
-                } else {
-                    renderThinking(text);
-                }
-                resetInputs();
-            } catch (e) { 
-                console.error(e); 
-                renderThinking("<span class='text-red-400'>分析失敗。</span>");
+                document.getElementById('target-status-content').innerHTML = `
+                    <div class="bg-emerald-500/10 p-4 rounded-xl border border-emerald-500/30">
+                        <p class="text-emerald-400 text-xs font-bold"><i class="fas fa-check-circle mr-2"></i>已建立並設定目標：<br>${targetDocName}</p>
+                        <button onclick="manualSelectTarget()" class="mt-2 text-[9px] text-slate-500 hover:text-slate-300 underline">選取其他位置</button>
+                    </div>
+                `;
+                document.getElementById('save-section').classList.remove('hidden');
+            } catch (e) { alert("文件建立失敗：" + e.message); }
+        }
+
+        async function triggerCreateFolder() {
+            const name = prompt("請輸入新資料夾名稱：");
+            if (!name) return;
+            try {
+                const resp = await gapi.client.drive.files.create({
+                    resource: {
+                        name: name,
+                        mimeType: 'application/vnd.google-apps.folder',
+                        parents: [currentSelectedFolderId]
+                    },
+                    fields: 'id, name'
+                });
+                currentSelectedFolderId = resp.result.id;
+                // 更新狀態為新建立的資料夾
+                handleTargetSelection({ action: 'picked', docs: [{ id: resp.result.id, name: resp.result.name, mimeType: 'application/vnd.google-apps.folder' }] });
+                alert(`資料夾「${name}」建立成功。`);
+            } catch (e) { alert("資料夾建立失敗：" + e.message); }
+        }
+
+        // --- 寫入內容功能 ---
+
+        async function saveToGoogleDoc() {
+            const content = document.getElementById('ai-output-content').value;
+            if (!content) return alert("請貼入 AI 產出的內容！");
+            if (!targetDocId) return alert("請先選取或建立一個目標文件！");
+
+            const btn = document.getElementById('save-btn');
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fas fa-spinner animate-spin mr-2"></i> 正在寫入雲端...`;
+
+            try {
+                await gapi.client.docs.documents.batchUpdate({
+                    documentId: targetDocId,
+                    resource: {
+                        requests: [{
+                            insertText: {
+                                endOfSegmentLocation: { segmentId: "" },
+                                text: "\n\n--- AI 深度研究報告 (" + new Date().toLocaleString() + ") ---\n" + content
+                            }
+                        }]
+                    }
+                });
+                alert("內容已成功追加至 Google 文件末尾！");
+                document.getElementById('ai-output-content').value = ""; // 清空輸入框
+            } catch (e) { alert("存檔失敗：" + e.message); } finally {
+                btn.disabled = false;
+                btn.innerText = "確認存檔 (追加至文件末尾)";
             }
-            finally { showLoading(false); }
         }
 
-        function updateUI() {
-            const consumed = currentDayData.meals.reduce((acc, m) => {
-                acc.cal += m.cal; acc.pro += m.pro; acc.carb += m.carb; acc.fat += m.fat;
-                return acc;
-            }, { cal: 0, pro: 0, carb: 0, fat: 0 });
-
-            document.getElementById('cal-remaining').textContent = Math.max(0, Math.round(currentDayData.targets.cal - consumed.cal));
-            document.getElementById('pro-label').textContent = `${Math.round(consumed.pro)}/${currentDayData.targets.pro}g`;
-            document.getElementById('carb-label').textContent = `${Math.round(consumed.carb)}/${currentDayData.targets.carb}g`;
-            document.getElementById('fat-label').textContent = `${Math.round(consumed.fat)}/${currentDayData.targets.fat}g`;
-
-            document.getElementById('pro-bar').style.width = `${Math.min(100, (consumed.pro/currentDayData.targets.pro)*100)}%`;
-            document.getElementById('carb-bar').style.width = `${Math.min(100, (consumed.carb/currentDayData.targets.carb)*100)}%`;
-            document.getElementById('fat-bar').style.width = `${Math.min(100, (consumed.fat/currentDayData.targets.fat)*100)}%`;
-
-            const listDiv = document.getElementById('meals-list');
-            listDiv.innerHTML = currentDayData.meals.map(m => `
-                <div class="flex justify-between border-b border-slate-800 py-2 text-[10px]">
-                    <span class="text-slate-500">${m.time}</span>
-                    <span class="flex-1 px-2 truncate text-slate-300 font-bold">${m.name}</span>
-                    <span class="text-emerald-400 font-mono">${Math.round(m.cal)}k</span>
-                </div>
-            `).join('') || '<div class="text-center text-slate-600 py-4 italic text-[10px]">選取資料夾以載入紀錄</div>';
-
-            const ctx = document.getElementById('calChart').getContext('2d');
-            if (calChart) calChart.destroy();
-            calChart = new Chart(ctx, {
-                type: 'doughnut',
-                data: { datasets: [{ data: [consumed.cal, Math.max(0, currentDayData.targets.cal - consumed.cal)], backgroundColor: ['#10b981', '#1e293b'], borderWidth: 0 }] },
-                options: { cutout: '85%', plugins: { legend: { display: false } }, responsive: true, maintainAspectRatio: false }
-            });
-        }
-
-        function renderThinking(text) {
-            const div = document.createElement('div');
-            div.className = "p-4 bg-slate-800/60 border border-slate-700 rounded-xl mb-4 text-slate-300 animate-fade-in text-[11px] leading-relaxed shadow-lg";
-            div.innerHTML = text;
-            document.getElementById('ai-content').prepend(div);
-        }
-
-        function resetInputs() {
-            document.getElementById('meal-text-input').value = "";
-            document.getElementById('food-img').value = "";
-            document.getElementById('preview-img').classList.add('hidden');
-            document.getElementById('upload-placeholder').classList.remove('hidden');
-        }
-
-        function showLoading(show, text = "") {
-            document.getElementById('loading-overlay').classList.toggle('hidden', !show);
-            document.getElementById('loading-text').textContent = text;
-        }
-
-        function toBase64(file) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
-                reader.onload = () => resolve(reader.result);
-            });
-        }
-
-        window.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('target-date').valueAsDate = new Date();
-            document.getElementById('food-img').onchange = function(evt) {
-                const [file] = evt.target.files;
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                        document.getElementById('preview-img').src = e.target.result;
-                        document.getElementById('preview-img').classList.remove('hidden');
-                        document.getElementById('upload-placeholder').classList.add('hidden');
-                    };
-                    reader.readAsDataURL(file);
+        function copyNames() {
+            const copyText = document.getElementById("raw-names");
+            copyText.classList.remove('hidden');
+            copyText.focus(); 
+            copyText.select();
+            try {
+                if (document.execCommand('copy')) {
+                    alert("影片名稱清單已複製！");
                 }
-            };
-        });
+            } catch (err) { alert("複製失敗，請手動複製。"); }
+            copyText.classList.add('hidden');
+        }
     </script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
 
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #0d1117; color: #f8fafc; overflow-x: hidden; }
-        .glass-card { background: rgba(22, 27, 34, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 1.25rem; }
-        .animate-fade-in { animation: fadeIn 0.4s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #0b0f1a; scroll-behavior: smooth; }
+        .glass-card { background: rgba(22, 30, 46, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .accent-gradient { background: linear-gradient(135deg, #6366f1 0%, #10b981 100%); }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
     </style>
 </head>
-<body class="p-4 md:p-8 min-h-screen">
-    
-    <div class="max-w-6xl mx-auto space-y-6">
-        <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 glass-card p-6 border-b border-emerald-500/20">
-            <div>
-                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400">HealthMind Pro</h1>
-                <p class="text-slate-500 text-[10px] mt-1 uppercase tracking-[0.2em]">民國格式檔案 · 自選專案資料夾存取模式</p>
+<body class="p-4 md:p-8 min-h-screen text-slate-200">
+
+    <div class="max-w-5xl mx-auto space-y-6">
+        <!-- 頁首 -->
+        <header class="flex flex-col md:flex-row justify-between items-center glass-card p-6 rounded-3xl gap-4">
+            <div class="text-center md:text-left">
+                <h1 class="text-2xl font-black accent-gradient bg-clip-text text-transparent">YouTube 深度研究員</h1>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mt-1">獨立選取位置 • 智慧文件管理 • AI 成果自動同步</p>
             </div>
-            <div class="flex flex-wrap items-center gap-3">
-                <div id="current-folder-display" class="hidden text-[10px] bg-emerald-500/10 text-emerald-400 px-3 py-1.5 rounded-full border border-emerald-500/20 font-bold"></div>
-                <input type="date" id="target-date" class="bg-slate-900 border border-slate-700 text-white p-2 rounded-xl text-sm focus:ring-1 focus:ring-emerald-500" onchange="if(accessToken) loadDailyData()">
-                <button id="auth-btn" onclick="handleAuthClick()" class="bg-blue-600 hover:bg-blue-500 px-5 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
-                    <i class="fab fa-google"></i> 1. 連結 Google
-                </button>
-                <button id="folder-select-btn" onclick="pickTargetFolder()" class="hidden bg-emerald-600 hover:bg-emerald-500 px-5 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
-                    <i class="fas fa-folder-open"></i> 2. 選取目標資料夾
+            <div id="auth-status">
+                <button onclick="handleAuthClick()" class="bg-indigo-600 hover:bg-indigo-500 px-6 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-900/20">
+                    <i class="fab fa-google mr-2"></i>連結 Google 帳號
                 </button>
             </div>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div class="lg:col-span-1 space-y-6">
-                <!-- 脈絡整合 -->
-                <section class="glass-card p-6">
-                    <h2 class="text-lg font-semibold mb-5 flex items-center gap-2 text-cyan-400"><i class="fas fa-database"></i> 知識脈絡整合</h2>
-                    <div class="space-y-4">
-                        <div class="space-y-2">
-                            <span class="text-[10px] text-slate-500 font-bold uppercase">飲食計畫與原則匯入</span>
-                            <div class="grid grid-cols-2 gap-2">
-                                <button onclick="createPicker('plan')" class="bg-slate-800 hover:bg-slate-700 p-2.5 rounded-xl text-[10px] border border-slate-700 transition">雲端多選</button>
-                                <button onclick="triggerLocalFile('plan')" class="bg-slate-800 hover:bg-slate-700 p-2.5 rounded-xl text-[10px] border border-slate-700 transition">本地上傳</button>
-                            </div>
-                        </div>
-                        <div class="space-y-2">
-                            <span class="text-[10px] text-slate-500 font-bold uppercase">以前紀錄匯入 (PDF/Doc)</span>
-                            <div class="grid grid-cols-2 gap-2">
-                                <button onclick="createPicker('history')" class="bg-slate-800 hover:bg-slate-700 p-2.5 rounded-xl text-[10px] border border-slate-700 transition">雲端多選</button>
-                                <button onclick="triggerLocalFile('history')" class="bg-slate-800 hover:bg-slate-700 p-2.5 rounded-xl text-[10px] border border-slate-700 transition">本地上傳</button>
-                            </div>
-                        </div>
-                        <!-- 今日進食清單 -->
-                        <div class="pt-4 mt-4 border-t border-slate-800">
-                            <span class="text-[10px] text-emerald-400 font-bold uppercase mb-2 block">今日進食流程明細 (增量寫入中)</span>
-                            <div id="meals-list" class="max-h-64 overflow-y-auto space-y-1 bg-slate-900/40 p-3 rounded-xl border border-slate-800">
-                                <div class="text-[10px] text-slate-600 italic text-center py-4">請先選取儲存路徑...</div>
-                            </div>
-                        </div>
+            <!-- 左側：影片管理區 -->
+            <div class="space-y-6">
+                <section class="glass-card p-6 rounded-3xl h-full">
+                    <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-indigo-400">
+                        <i class="fas fa-film"></i> 1. 影片檔案管理
+                    </h2>
+                    <button onclick="createVideoPicker()" disabled class="auth-required opacity-50 w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl border border-slate-700 transition text-xs font-bold mb-4">
+                        <i class="fas fa-plus mr-2"></i>選取/增加影片
+                    </button>
+                    
+                    <div id="selected-files-list" class="space-y-2 max-h-64 overflow-y-auto custom-scrollbar mb-4">
+                        <p class="text-[10px] text-slate-500 italic">尚未選取影片</p>
                     </div>
-                </section>
 
-                <!-- 本次攝取紀錄 -->
-                <section class="glass-card p-6 border-emerald-500/20 bg-emerald-500/5 shadow-2xl shadow-emerald-500/5">
-                    <h2 class="text-lg font-semibold mb-5 flex items-center gap-2 text-orange-400"><i class="fas fa-utensils"></i> 紀錄本次攝取</h2>
-                    <div class="space-y-4">
-                        <div class="border-2 border-dashed border-slate-700 rounded-2xl p-5 text-center relative cursor-pointer hover:border-emerald-500/50 transition bg-slate-900/80">
-                            <input type="file" id="food-img" class="absolute inset-0 opacity-0 cursor-pointer z-10">
-                            <div id="upload-placeholder"><i class="fas fa-camera text-2xl text-slate-500 mb-2"></i><p class="text-[10px] text-slate-400 tracking-wide">拍照或上傳食物照片</p></div>
-                            <img id="preview-img" class="hidden w-full h-32 object-cover rounded-xl shadow-md">
-                        </div>
-                        
-                        <div class="space-y-2">
-                            <label class="text-[10px] text-slate-500 font-bold uppercase">飲食描述與文字分析</label>
-                            <textarea id="meal-text-input" rows="3" placeholder="敘述食物內容..." class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-[11px] outline-none focus:border-emerald-500 transition"></textarea>
-                        </div>
-
-                        <button onclick="processIntake()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-3.5 rounded-xl font-bold text-sm transition shadow-xl flex items-center justify-center gap-2">
-                            <i class="fas fa-magic"></i> 分析並寫入專案文件
+                    <div id="step-1-result-area" class="hidden pt-4 border-t border-slate-700/50">
+                        <textarea id="raw-names" class="hidden"></textarea>
+                        <button onclick="copyNames()" class="w-full bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 py-2 rounded-lg text-[10px] font-bold border border-indigo-500/30 transition">
+                            <i class="far fa-copy mr-1"></i> 複製清單提供給 AI
                         </button>
                     </div>
                 </section>
             </div>
 
-            <!-- 右側數據摘要與建議 -->
-            <div class="lg:col-span-2 space-y-6">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div class="glass-card p-8 flex flex-col items-center justify-center min-h-[320px]">
-                        <h3 class="text-xs text-slate-400 mb-6 w-full uppercase tracking-widest text-center font-bold">今日熱量剩餘預算</h3>
-                        <div class="relative w-56 h-56"><canvas id="calChart"></canvas>
-                        <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                            <span class="text-4xl font-bold text-white" id="cal-remaining">0</span>
-                            <span class="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">kcal left</span>
-                        </div></div>
-                    </div>
-                    <div class="glass-card p-8 space-y-6">
-                        <h3 class="text-xs text-slate-400 uppercase tracking-widest font-bold">每日指標達成狀況</h3>
-                        <div class="space-y-5">
-                            <div><div class="flex justify-between text-[11px] mb-2 font-mono text-blue-300"><span>蛋白質 (120g)</span><span id="pro-label">0/120g</span></div><div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden shadow-inner"><div id="pro-bar" class="h-full bg-blue-500 transition-all duration-700 rounded-full"></div></div></div>
-                            <div><div class="flex justify-between text-[11px] mb-2 font-mono text-emerald-300"><span>碳水 (150g)</span><span id="carb-label">0/150g</span></div><div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden shadow-inner"><div id="carb-bar" class="h-full bg-emerald-500 transition-all duration-700 rounded-full"></div></div></div>
-                            <div><div class="flex justify-between text-[11px] mb-2 font-mono text-orange-300"><span>脂肪 (60g)</span><span id="fat-label">0/60g</span></div><div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden shadow-inner"><div id="fat-bar" class="h-full bg-orange-500 transition-all duration-700 rounded-full"></div></div></div>
-                        </div>
-                    </div>
-                </div>
-                <section class="glass-card p-8 min-h-[300px] border border-emerald-500/10">
-                    <h2 class="text-xl font-bold mb-5 flex items-center gap-3 text-emerald-400"><i class="fas fa-microchip"></i> AI 臨床分析建議紀錄</h2>
-                    <div id="ai-content" class="text-xs text-slate-300 leading-relaxed">
-                        <p class="text-slate-500 italic">選取專案資料夾後，分析結果將自動以「進食流程表格」格式增量存檔。</p>
+            <!-- 中間：儲存位置區 -->
+            <div class="space-y-6">
+                <section class="glass-card p-6 rounded-3xl h-full">
+                    <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-cyan-400">
+                        <i class="fas fa-hdd"></i> 2. 設定儲存位置
+                    </h2>
+                    <p class="text-[10px] text-slate-400 mb-4 leading-relaxed">您可以直接選取現有文件，或是選取資料夾後點擊「新增」來建立。此操作與影片選取互不干擾。</p>
+                    
+                    <button onclick="manualSelectTarget()" disabled class="auth-required opacity-50 w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl border border-slate-700 transition text-xs font-bold mb-6">
+                        <i class="fas fa-search-location mr-2"></i>瀏覽雲端硬碟
+                    </button>
+
+                    <div id="target-status-content" class="space-y-4">
+                        <p class="text-[10px] text-slate-500 italic text-center">請先選取目標位置</p>
                     </div>
                 </section>
             </div>
+
+            <!-- 右側：存檔區 -->
+            <div class="space-y-6">
+                <section id="save-section" class="hidden glass-card p-6 rounded-3xl border-emerald-500/20">
+                    <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-emerald-400">
+                        <i class="fas fa-file-export"></i> 3. 匯入內容
+                    </h2>
+                    <textarea id="ai-output-content" rows="12" class="w-full bg-slate-900/50 border border-slate-700 rounded-2xl p-4 text-[11px] focus:ring-1 focus:ring-emerald-500 outline-none mb-4 custom-scrollbar" placeholder="在此貼上 AI 產出的 Markdown 詳細內容..."></textarea>
+                    <button id="save-btn" onclick="saveToGoogleDoc()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-xl font-bold transition-all text-sm shadow-lg shadow-emerald-900/20">
+                        確認存檔 (追加至文件)
+                    </button>
+                    <p class="mt-4 text-[9px] text-slate-500 text-center italic">內容將被追加到所選 Google 文件的最末端</p>
+                </section>
+                
+                <div id="save-placeholder" class="glass-card p-6 rounded-3xl flex flex-col items-center justify-center text-center opacity-40 py-12">
+                    <i class="fas fa-lock text-3xl mb-4 text-slate-600"></i>
+                    <p class="text-xs text-slate-500">請先完成步驟 2<br>選取一個「目標文件」以開啟存檔功能</p>
+                </div>
+            </div>
         </div>
     </div>
-    <!-- 載入動畫 -->
-    <div id="loading-overlay" class="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-[100] hidden flex flex-col items-center justify-center">
-        <div class="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-        <p id="loading-text" class="mt-6 text-emerald-400 text-sm font-bold tracking-widest uppercase"></p>
-    </div>
+
+    <footer class="mt-8 text-center text-slate-600 text-[10px] uppercase tracking-tighter">
+        穩定運行中 • 支援多選與即時刪除 • 已獲取 Drive.File 操作權限
+    </footer>
+
+    <script>
+        // 切換存檔區域顯示邏輯
+        const observer = new MutationObserver(() => {
+            const saveSection = document.getElementById('save-section');
+            const placeholder = document.getElementById('save-placeholder');
+            if (targetDocId) {
+                saveSection.classList.remove('hidden');
+                placeholder.classList.add('hidden');
+            } else {
+                saveSection.classList.add('hidden');
+                placeholder.classList.remove('hidden');
+            }
+        });
+        observer.observe(document.getElementById('target-status-content'), { childList: true });
+    </script>
 </body>
 </html>
