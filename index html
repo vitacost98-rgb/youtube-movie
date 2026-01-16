@@ -13,7 +13,7 @@
         const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
         
         // 2. 在 GitHub Pages 部署時，此處必須填入有效的 API KEY 否則選取器無法開啟
-        const API_KEY = ""; 
+        const API_KEY = "AIzaSyBEPZ63SlEwuT614_SOlL9Ku-l6tXinST4"; 
         
         const SCOPES = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents';
         const DEFAULT_FOLDER_NAME = "YouTube_研究報告"; 
@@ -421,3 +421,4 @@
     </script>
 </body>
 </html>
+
