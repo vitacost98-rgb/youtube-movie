@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube 影片研究員 - 專業版 v2.4</title>
+    <title>YouTube 影片研究員 - 專業版 v2.5</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
@@ -13,53 +13,64 @@
         import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- Firebase 配置 ---
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'yt-researcher-default';
+        // --- 安全的 Firebase 初始化 ---
+        try {
+            const firebaseConfig = typeof __firebase_config !== 'undefined' 
+                ? JSON.parse(__firebase_config) 
+                : { apiKey: "fallback", authDomain: "fallback", projectId: "fallback" };
+            
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const db = getFirestore(app);
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'yt-researcher-default';
 
-        window.db = db;
-        window.auth = auth;
-        window.appId = appId;
+            window.db = db;
+            window.auth = auth;
+            window.appId = appId;
 
-        const initAuth = async () => {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                await signInAnonymously(auth);
-            }
-        };
-
-        initAuth();
-
-        onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                loadMemory();
-            }
-        });
-
-        async function loadMemory() {
-            const user = auth.currentUser;
-            if (!user) return;
-            const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
-            try {
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
-                    window.lastVideoFolder = docSnap.data().lastVideoFolder || 'root';
-                    window.lastTargetFolder = docSnap.data().lastTargetFolder || 'root';
+            const initAuth = async () => {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (e) {
+                    console.error("Authentication failed:", e);
                 }
-            } catch (e) { console.error("Memory load failed", e); }
-        }
+            };
 
-        window.saveMemory = async (type, folderId) => {
-            const user = auth.currentUser;
-            if (!user || !folderId) return;
-            const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
-            const data = type === 'video' ? { lastVideoFolder: folderId } : { lastTargetFolder: folderId };
-            await setDoc(docRef, data, { merge: true });
-        };
+            initAuth();
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    loadMemory();
+                }
+            });
+
+            async function loadMemory() {
+                const user = auth.currentUser;
+                if (!user) return;
+                const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
+                try {
+                    const docSnap = await getDoc(docRef);
+                    if (docSnap.exists()) {
+                        window.lastVideoFolder = docSnap.data().lastVideoFolder || 'root';
+                        window.lastTargetFolder = docSnap.data().lastTargetFolder || 'root';
+                    }
+                } catch (e) { console.error("Memory load failed", e); }
+            }
+
+            window.saveMemory = async (type, folderId) => {
+                const user = auth.currentUser;
+                if (!user || !folderId) return;
+                const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
+                const data = type === 'video' ? { lastVideoFolder: folderId } : { lastTargetFolder: folderId };
+                await setDoc(docRef, data, { merge: true });
+            };
+        } catch (error) {
+            console.error("Firebase startup error:", error);
+        }
     </script>
 
     <script>
@@ -98,24 +109,32 @@
         }
 
         function gisLoaded() {
-            const tokenClient = google.accounts.oauth2.initTokenClient({
-                client_id: CLIENT_ID,
-                scope: SCOPES,
-                ux_mode: 'popup', 
-                callback: (resp) => {
-                    if (resp.error) return;
-                    accessToken = resp.access_token;
-                    document.getElementById('auth-status-ui').innerHTML = `<span class="text-emerald-400 text-[10px] font-bold border border-emerald-500/30 px-3 py-1 rounded-full bg-emerald-500/10"><i class="fas fa-check-circle mr-1"></i> Google API 已授權</span>`;
-                    document.querySelectorAll('.auth-required').forEach(el => { 
-                        el.disabled = false; 
-                        el.classList.remove('opacity-40', 'cursor-not-allowed'); 
-                    });
-                },
-            });
-            window.tokenClient = tokenClient;
+            try {
+                const tokenClient = google.accounts.oauth2.initTokenClient({
+                    client_id: CLIENT_ID,
+                    scope: SCOPES,
+                    ux_mode: 'popup', 
+                    callback: (resp) => {
+                        if (resp.error) return;
+                        accessToken = resp.access_token;
+                        document.getElementById('auth-status-ui').innerHTML = `<span class="text-emerald-400 text-[10px] font-bold border border-emerald-500/30 px-3 py-1 rounded-full bg-emerald-500/10"><i class="fas fa-check-circle mr-1"></i> Google API 已授權</span>`;
+                        document.querySelectorAll('.auth-required').forEach(el => { 
+                            el.disabled = false; 
+                            el.classList.remove('opacity-40', 'cursor-not-allowed'); 
+                        });
+                    },
+                });
+                window.tokenClient = tokenClient;
+            } catch (e) { console.error("GIS 載入錯誤:", e); }
         }
 
-        function handleAuthClick() { window.tokenClient.requestAccessToken({ prompt: 'select_account' }); }
+        function handleAuthClick() { 
+            if (window.tokenClient) {
+                window.tokenClient.requestAccessToken({ prompt: 'select_account' }); 
+            } else {
+                alert("Google 授權元件尚未準備好，請稍後再試。");
+            }
+        }
 
         // --- 1. 影片選取管理 ---
 
@@ -226,7 +245,6 @@
         function manualSelectTarget() {
             if (!accessToken) return handleAuthClick();
             if (!pickerApiLoaded) {
-                // 如果 Picker 還沒載入，則手動觸發一次載入
                 gapi.load('picker', () => { pickerApiLoaded = true; manualSelectTarget(); });
                 return;
             }
@@ -389,7 +407,7 @@
             <section class="glass p-8 rounded-[2.5rem] flex flex-col border-white/5">
                 <h2 class="text-xs font-black text-indigo-400 mb-6 uppercase tracking-widest">影片檔案選取</h2>
                 
-                <button onclick="createVideoPicker()" disabled class="auth-required opacity-40 cursor-not-allowed w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl text-white text-xs font-bold transition-all mb-6">
+                <button onclick="createVideoPicker()" disabled class="auth-required opacity-40 cursor-not-allowed w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl text-white text-xs font-bold transition-all mb-6 shadow-lg shadow-indigo-900/20">
                     <i class="fas fa-cloud-download-alt mr-2"></i>從雲端載入影片
                 </button>
                 
