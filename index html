@@ -9,12 +9,8 @@
     
     <script>
         // --- [重要設定區] ---
-        // 1. OAuth 用戶端 ID
         const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
-        
-        // 2. 您的 API 金鑰 (已填入)
         const API_KEY = "AIzaSyBEPZ63SlEwuT614_SOlL9Ku-l6tXinST4"; 
-        
         const SCOPES = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents';
         const DEFAULT_FOLDER_NAME = "YouTube_研究報告"; 
         // ------------------
@@ -26,10 +22,29 @@
         let targetDoc = { id: null, name: "" };
         let projectFolderId = null;
 
-        // 初始化 Google API
+        // --- [診斷工具] ---
+        function updateStatus(id, status, colorClass) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.innerText = status;
+                el.className = colorClass;
+            }
+        }
+
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error("捕獲到全域錯誤:", message);
+            logToUI(`系統錯誤: ${message} (行: ${lineno})`);
+            return false;
+        };
+
+        // --- [Google API 載入邏輯] ---
+
         function gapiLoaded() {
+            console.log("GAPI 腳本已下載");
+            updateStatus('stat-gapi', '已下載 (等待初始化...)', 'text-amber-400');
             gapi.load('client:picker', async () => {
                 try {
+                    console.log("正在初始化 GAPI 用戶端...");
                     await gapi.client.init({
                         apiKey: API_KEY,
                         discoveryDocs: [
@@ -37,15 +52,20 @@
                             'https://docs.googleapis.com/$discovery/rest?version=v1'
                         ]
                     });
-                    console.log("GAPI 載入完成");
+                    console.log("GAPI 初始化成功");
+                    updateStatus('stat-gapi', '運作中 (OK)', 'text-emerald-400');
                 } catch (e) { 
-                    console.error("GAPI 初始化錯誤:", e);
-                    logToUI("GAPI 初始化失敗，請檢查 API Key 是否正確或是否有網域限制。");
+                    console.error("GAPI 初始化失敗:", e);
+                    const errorMsg = e.details || e.message || JSON.stringify(e);
+                    logToUI("GAPI 失敗: " + errorMsg);
+                    updateStatus('stat-gapi', '初始化失敗', 'text-red-400');
                 }
             });
         }
 
         function gisLoaded() {
+            console.log("GIS (Identity) 腳本已下載");
+            updateStatus('stat-gis', '已下載 (等待認證...)', 'text-amber-400');
             try {
                 tokenClient = google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID,
@@ -57,15 +77,18 @@
                             return logToUI("授權失敗：" + resp.error);
                         }
                         accessToken = resp.access_token;
-                        document.getElementById('auth-btn').innerHTML = `<i class="fas fa-check-circle"></i> 雲端硬碟已連線`;
+                        updateStatus('stat-gis', '已連線 (OK)', 'text-emerald-400');
+                        document.getElementById('auth-btn').innerHTML = `<i class="fas fa-check-circle"></i> 雲端連線成功`;
                         document.getElementById('auth-btn').className = "bg-emerald-600 px-6 py-2.5 rounded-2xl text-sm font-bold flex items-center gap-2 transition shadow-lg shadow-emerald-900/20";
                         
                         await initializeEnvironment();
                     },
                 });
+                console.log("GIS 用戶端已建立");
             } catch (e) { 
-                console.error("GIS Error:", e); 
-                logToUI("Google 認證模組載入失敗。");
+                console.error("GIS 初始化錯誤:", e); 
+                logToUI("GIS 初始化失敗: " + e.message);
+                updateStatus('stat-gis', '模組錯誤', 'text-red-400');
             }
         }
 
@@ -76,7 +99,8 @@
         }
 
         function handleAuthClick() {
-            if (!tokenClient) return alert("API 初始化中，請稍候...");
+            console.log("點擊登入按鈕");
+            if (!tokenClient) return alert("API 還沒準備好，請檢查底部診斷狀態。");
             tokenClient.requestAccessToken({ prompt: 'select_account' });
         }
 
@@ -107,7 +131,7 @@
                 showToast("雲端環境就緒");
             } catch (err) { 
                 console.error("環境初始化錯誤:", err);
-                logToUI("資料夾存取失敗。請確認 Cloud Console 是否已開啟 Drive API。");
+                logToUI("資料夾存取失敗。請確認是否已開啟 Drive API。");
             } finally { 
                 showLoading(false); 
             }
@@ -144,7 +168,7 @@
                 picker.setVisible(true);
             } catch (e) {
                 console.error("Picker 開啟失敗:", e);
-                logToUI("無法開啟選取視窗。請確認 Google Picker API 已啟用且 API Key 權限正確。");
+                logToUI("無法開啟選取視窗。請確認 Google Picker API 已在後台啟用。");
             }
         }
 
@@ -317,7 +341,7 @@
             <div class="space-y-1">
                 <h1 class="text-3xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400">YouTube Researcher Pro</h1>
                 <p class="text-slate-500 text-[11px] uppercase tracking-[0.3em] font-medium">智慧路徑記憶 • 自動化存檔與清理</p>
-                <div id="debug-log" class="hidden mt-2 p-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-xs font-bold"></div>
+                <div id="debug-log" class="hidden mt-2 p-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-[10px] font-bold"></div>
             </div>
             <button id="auth-btn" onclick="handleAuthClick()" class="bg-blue-600 hover:bg-blue-500 px-6 py-2.5 rounded-2xl text-sm font-bold flex items-center gap-2 transition shadow-lg shadow-blue-900/30">
                 <i class="fab fa-google"></i> 連結雲端帳號
@@ -394,6 +418,22 @@
                 </div>
             </div>
         </div>
+
+        <!-- System Diagnostics Footer -->
+        <footer class="glass-card p-4 flex flex-wrap gap-6 items-center justify-center text-[10px] uppercase tracking-widest opacity-60">
+            <div class="flex items-center gap-2">
+                <span class="text-slate-500">GAPI Status:</span>
+                <span id="stat-gapi" class="text-slate-400 font-bold">等待中...</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-slate-500">GIS Status:</span>
+                <span id="stat-gis" class="text-slate-400 font-bold">等待中...</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-slate-500">Domain:</span>
+                <span class="text-emerald-500 font-bold">Authorized</span>
+            </div>
+        </footer>
     </div>
 
     <!-- Loading Overlay -->
@@ -402,6 +442,7 @@
         <p id="loading-text" class="text-emerald-400 text-sm font-bold tracking-widest uppercase"></p>
     </div>
 
+    <!-- 注意: 腳本載入順序很重要 -->
     <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
     <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
 </body>
