@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube 影片研究員 - 專業版 v2.4</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase 配置 ---
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'yt-researcher-default';
+
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+
+        const initAuth = async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                loadMemory();
+            }
+        });
+
+        async function loadMemory() {
+            const user = auth.currentUser;
+            if (!user) return;
+            const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
+            try {
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    window.lastVideoFolder = docSnap.data().lastVideoFolder || 'root';
+                    window.lastTargetFolder = docSnap.data().lastTargetFolder || 'root';
+                }
+            } catch (e) { console.error("Memory load failed", e); }
+        }
+
+        window.saveMemory = async (type, folderId) => {
+            const user = auth.currentUser;
+            if (!user || !folderId) return;
+            const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'folder_memory');
+            const data = type === 'video' ? { lastVideoFolder: folderId } : { lastTargetFolder: folderId };
+            await setDoc(docRef, data, { merge: true });
+        };
+    </script>
+
+    <script>
+        // --- [Google API 設定] ---
+        const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
+        const API_KEY = ""; 
+        const SCOPES = [
+            'https://www.googleapis.com/auth/drive.readonly',
+            'https://www.googleapis.com/auth/drive.metadata.readonly',
+            'https://www.googleapis.com/auth/documents',
+            'https://www.googleapis.com/auth/drive.file',
+            'https://www.googleapis.com/auth/drive'
+        ].join(' ');
+
+        const PROJECT_NUMBER = CLIENT_ID.split('-')[0];
+        let accessToken = null;
+        let selectedVideos = []; 
+        let targetDocId = null;
+        let currentSelectedFolderId = 'root';
+        let pendingDeleteIndex = null;
+        let pickerApiLoaded = false;
+
+        function gapiLoaded() {
+            gapi.load('client:picker', async () => {
+                try {
+                    await gapi.client.init({
+                        apiKey: API_KEY,
+                        discoveryDocs: [
+                            'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest',
+                            'https://docs.googleapis.com/$discovery/rest?version=v1'
+                        ]
+                    });
+                    pickerApiLoaded = true;
+                } catch (e) { console.error("GAPI 初始化失敗:", e); }
+            });
+        }
+
+        function gisLoaded() {
+            const tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                ux_mode: 'popup', 
+                callback: (resp) => {
+                    if (resp.error) return;
+                    accessToken = resp.access_token;
+                    document.getElementById('auth-status-ui').innerHTML = `<span class="text-emerald-400 text-[10px] font-bold border border-emerald-500/30 px-3 py-1 rounded-full bg-emerald-500/10"><i class="fas fa-check-circle mr-1"></i> Google API 已授權</span>`;
+                    document.querySelectorAll('.auth-required').forEach(el => { 
+                        el.disabled = false; 
+                        el.classList.remove('opacity-40', 'cursor-not-allowed'); 
+                    });
+                },
+            });
+            window.tokenClient = tokenClient;
+        }
+
+        function handleAuthClick() { window.tokenClient.requestAccessToken({ prompt: 'select_account' }); }
+
+        // --- 1. 影片選取管理 ---
+
+        function createVideoPicker() {
+            if (!accessToken) return handleAuthClick();
+            if (!pickerApiLoaded) return alert("Picker API 載入中，請稍候...");
+            
+            const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+                .setMimeTypes('video/mp4,video/quicktime,video/x-msvideo,application/vnd.google-apps.document,text/plain')
+                .setIncludeFolders(true);
+            
+            if (window.lastVideoFolder && window.lastVideoFolder !== 'root') {
+                view.setParent(window.lastVideoFolder);
+            }
+            
+            const picker = new google.picker.PickerBuilder()
+                .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+                .setAppId(PROJECT_NUMBER)
+                .setOAuthToken(accessToken)
+                .setDeveloperKey(API_KEY)
+                .addView(view)
+                .setCallback(videoPickerCallback)
+                .build();
+            picker.setVisible(true);
+        }
+
+        function videoPickerCallback(data) {
+            if (data.action === google.picker.Action.PICKED) {
+                const docs = data.docs.filter(doc => doc.mimeType !== 'application/vnd.google-apps.folder');
+                const newVideos = docs.map(doc => ({ 
+                    id: doc.id, 
+                    name: doc.name || doc.title || "未命名檔案" 
+                }));
+                
+                if (data.docs[0] && data.docs[0].parentId) {
+                    window.saveMemory('video', data.docs[0].parentId);
+                }
+
+                selectedVideos = [...new Map([...selectedVideos, ...newVideos].map(item => [item.id, item])).values()];
+                renderSelectedList();
+            }
+        }
+
+        function confirmRemoveVideo(index) {
+            pendingDeleteIndex = index;
+            const video = selectedVideos[index];
+            document.getElementById('modal-video-name').innerText = video.name;
+            document.getElementById('delete-choice-modal').classList.remove('hidden');
+        }
+
+        function removeOnlyFromList() {
+            if (pendingDeleteIndex !== null) {
+                selectedVideos.splice(pendingDeleteIndex, 1);
+                renderSelectedList();
+            }
+            closeModal();
+        }
+
+        async function executeDeleteFromDrive() {
+            if (pendingDeleteIndex === null) return;
+            const videoId = selectedVideos[pendingDeleteIndex].id;
+            
+            showLoading(true, "正在自雲端硬碟永久刪除...");
+            try {
+                await gapi.client.drive.files.delete({ fileId: videoId });
+                selectedVideos.splice(pendingDeleteIndex, 1);
+                renderSelectedList();
+                closeModal();
+                alert("檔案已成功從雲端硬碟移除。");
+            } catch (e) {
+                alert("刪除失敗 (可能是權限不足): " + e.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('delete-choice-modal').classList.add('hidden');
+            pendingDeleteIndex = null;
+        }
+
+        function renderSelectedList() {
+            const container = document.getElementById('selected-files-list');
+            const step1Result = document.getElementById('step-1-result-area');
+            
+            if (selectedVideos.length === 0) {
+                container.innerHTML = `<div class="py-12 text-center text-[10px] text-slate-600 italic border-2 border-dashed border-slate-800 rounded-3xl">尚未選取影片</div>`;
+                step1Result.classList.add('hidden');
+                return;
+            }
+
+            step1Result.classList.remove('hidden');
+            container.innerHTML = selectedVideos.map((v, idx) => `
+                <div class="bg-slate-800/40 p-3 rounded-2xl border border-slate-700/50 text-xs text-slate-200 flex justify-between items-center group">
+                    <span class="truncate pr-4 flex items-center font-medium">
+                        <i class="fas fa-file-video mr-3 text-indigo-400"></i>${v.name}
+                    </span>
+                    <button onclick="confirmRemoveVideo(${idx})" class="text-slate-500 hover:text-red-400 transition-colors p-1">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
+                </div>
+            `).join('');
+            document.getElementById('raw-names').value = selectedVideos.map(v => v.name).join('\n');
+        }
+
+        // --- 2. 儲存位置管理 ---
+
+        function manualSelectTarget() {
+            if (!accessToken) return handleAuthClick();
+            if (!pickerApiLoaded) {
+                // 如果 Picker 還沒載入，則手動觸發一次載入
+                gapi.load('picker', () => { pickerApiLoaded = true; manualSelectTarget(); });
+                return;
+            }
+
+            const statusEl = document.getElementById('target-status-content');
+            statusEl.innerHTML = `<p class="text-[10px] text-cyan-400 animate-pulse"><i class="fas fa-spinner animate-spin mr-2"></i>正在開啟選取視窗...</p>`;
+
+            try {
+                const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+                    .setMimeTypes('application/vnd.google-apps.document,application/vnd.google-apps.folder')
+                    .setIncludeFolders(true)
+                    .setSelectableMimeTypes('application/vnd.google-apps.document,application/vnd.google-apps.folder');
+                
+                if (window.lastTargetFolder && window.lastTargetFolder !== 'root') {
+                    view.setParent(window.lastTargetFolder);
+                }
+                
+                const picker = new google.picker.PickerBuilder()
+                    .setAppId(PROJECT_NUMBER)
+                    .setOAuthToken(accessToken)
+                    .setDeveloperKey(API_KEY)
+                    .addView(view)
+                    .setCallback(handleTargetSelection)
+                    .build();
+                picker.setVisible(true);
+            } catch (e) {
+                console.error("Picker failed to initialize", e);
+                statusEl.innerHTML = `<p class="text-[10px] text-red-400 italic">選取視窗啟動失敗，請重新整理</p>`;
+            }
+        }
+
+        async function handleTargetSelection(data) {
+            const statusEl = document.getElementById('target-status-content');
+            
+            if (data.action === google.picker.Action.CANCEL) {
+                statusEl.innerHTML = `<p class="text-[10px] text-slate-600 italic text-center">已取消選取</p>`;
+                return;
+            }
+
+            if (data.action === google.picker.Action.PICKED) {
+                const item = data.docs[0];
+                
+                if (item.mimeType === 'application/vnd.google-apps.folder') {
+                    window.saveMemory('target', item.id);
+                    currentSelectedFolderId = item.id;
+                    targetDocId = null;
+                    statusEl.innerHTML = `
+                        <div class="bg-indigo-500/5 p-5 rounded-3xl border border-indigo-500/20 w-full">
+                            <p class="text-indigo-300 text-xs mb-4 font-bold"><i class="fas fa-folder mr-2"></i>已選取資料夾：${item.name}</p>
+                            <div class="grid grid-cols-1 gap-2">
+                                <button onclick="triggerCreateDoc()" class="bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-2xl text-[10px] font-bold transition">在此資料夾新增研究報告</button>
+                                <button onclick="manualSelectTarget()" class="text-[10px] text-slate-500 mt-2 hover:text-slate-300">重新選取目標</button>
+                            </div>
+                        </div>
+                    `;
+                    toggleSaveSection(false);
+                } else {
+                    if (item.parentId) window.saveMemory('target', item.parentId);
+                    targetDocId = item.id;
+                    statusEl.innerHTML = `
+                        <div class="bg-emerald-500/5 p-5 rounded-3xl border border-emerald-500/20 w-full text-center">
+                            <div class="text-emerald-500 text-2xl mb-2"><i class="fas fa-check-circle"></i></div>
+                            <p class="text-xs text-slate-200 font-bold mb-3 truncate">${item.name}</p>
+                            <button onclick="manualSelectTarget()" class="text-[9px] text-slate-500 underline hover:text-slate-300">更換目標文件</button>
+                        </div>
+                    `;
+                    toggleSaveSection(true);
+                }
+            }
+        }
+
+        async function triggerCreateDoc() {
+            const name = prompt("輸入新文件名稱：", selectedVideos[0] ? selectedVideos[0].name + "_研究報告" : "YouTube研究報告");
+            if (!name) return;
+            try {
+                const resp = await gapi.client.drive.files.create({
+                    resource: { name: name, mimeType: 'application/vnd.google-apps.document', parents: [currentSelectedFolderId] },
+                    fields: 'id, name'
+                });
+                targetDocId = resp.result.id;
+                handleTargetSelection({ action: 'picked', docs: [{ id: resp.result.id, name: resp.result.name, mimeType: 'application/vnd.google-apps.document' }] });
+            } catch (e) { alert("建立失敗"); }
+        }
+
+        function toggleSaveSection(show) {
+            document.getElementById('save-section').classList.toggle('hidden', !show);
+            document.getElementById('save-placeholder').classList.toggle('hidden', show);
+        }
+
+        async function saveToGoogleDoc() {
+            const content = document.getElementById('ai-output-content').value;
+            if (!content) return alert("請貼入分析內容！");
+            const btn = document.getElementById('save-btn');
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fas fa-spinner animate-spin mr-2"></i> 正在存檔...`;
+            try {
+                await gapi.client.docs.documents.batchUpdate({
+                    documentId: targetDocId,
+                    resource: {
+                        requests: [{
+                            insertText: {
+                                endOfSegmentLocation: { segmentId: "" },
+                                text: "\n\n--- 深度分析報告 (" + new Date().toLocaleString() + ") ---\n" + content
+                            }
+                        }]
+                    }
+                });
+                alert("內容已成功寫入 Google 文件！");
+                document.getElementById('ai-output-content').value = "";
+            } catch (e) { alert("存檔失敗：" + e.message); } finally {
+                btn.disabled = false;
+                btn.innerText = "確認寫入 Google 文件";
+            }
+        }
+
+        function copyNames() {
+            const copyText = document.getElementById("raw-names");
+            copyText.classList.remove('hidden');
+            copyText.focus(); copyText.select();
+            document.execCommand('copy');
+            alert("名稱已複製！請提供給 AI。");
+            copyText.classList.add('hidden');
+        }
+
+        function showLoading(show, text="") {
+            document.getElementById('loading-overlay').classList.toggle('hidden', !show);
+            document.getElementById('loading-text').innerText = text;
+        }
+    </script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background: #05070a; color: #cbd5e1; }
+        .glass { background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.03); }
+        .custom-scrollbar::-webkit-scrollbar { width: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen">
+
+    <div class="max-w-6xl mx-auto space-y-8">
+        <!-- Header -->
+        <header class="flex flex-col md:flex-row justify-between items-center glass p-8 rounded-[2.5rem] gap-6 border-indigo-500/10">
+            <div>
+                <h1 class="text-2xl font-black text-white tracking-tight flex items-center">
+                    <span class="bg-indigo-600 w-8 h-8 rounded-lg flex items-center justify-center mr-3 text-sm"><i class="fas fa-bolt"></i></span>
+                    YouTube Research <span class="text-indigo-400 ml-2 font-light">Pro</span>
+                </h1>
+                <p id="auth-status-ui" class="text-[9px] text-slate-500 uppercase tracking-[0.2em] font-bold mt-2">等待授權中...</p>
+            </div>
+            <button onclick="handleAuthClick()" class="bg-white hover:bg-indigo-50 text-slate-900 px-8 py-3 rounded-2xl text-[11px] font-black transition-all shadow-xl shadow-white/5">
+                <i class="fab fa-google mr-2"></i>連結 Google 帳號
+            </button>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- 區塊 1: 影片檔案 -->
+            <section class="glass p-8 rounded-[2.5rem] flex flex-col border-white/5">
+                <h2 class="text-xs font-black text-indigo-400 mb-6 uppercase tracking-widest">影片檔案選取</h2>
+                
+                <button onclick="createVideoPicker()" disabled class="auth-required opacity-40 cursor-not-allowed w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl text-white text-xs font-bold transition-all mb-6">
+                    <i class="fas fa-cloud-download-alt mr-2"></i>從雲端載入影片
+                </button>
+                
+                <div id="selected-files-list" class="space-y-3 max-h-80 overflow-y-auto pr-2 custom-scrollbar flex-grow">
+                    <div class="py-12 text-center text-[10px] text-slate-600 italic">尚未選取影片</div>
+                </div>
+
+                <div id="step-1-result-area" class="hidden mt-6 pt-6 border-t border-slate-800">
+                    <textarea id="raw-names" class="hidden"></textarea>
+                    <button onclick="copyNames()" class="w-full bg-slate-800 hover:bg-slate-700 text-indigo-300 py-3 rounded-xl text-[10px] font-black border border-indigo-500/10 transition-all">
+                        <i class="far fa-copy mr-2"></i> 複製清單提供給 AI
+                    </button>
+                </div>
+            </section>
+
+            <!-- 區塊 2: 儲存目標 -->
+            <section class="glass p-8 rounded-[2.5rem] flex flex-col border-white/5">
+                <h2 class="text-xs font-black text-cyan-400 mb-6 uppercase tracking-widest">路徑記憶與儲存</h2>
+                <p class="text-[11px] text-slate-500 mb-6 leading-relaxed">設定一個儲存分析結果的目標文件或資料夾。</p>
+                
+                <button onclick="manualSelectTarget()" disabled class="auth-required opacity-40 cursor-not-allowed w-full bg-slate-800 hover:bg-slate-700 py-4 rounded-2xl text-white text-xs font-bold transition-all mb-6 border border-slate-700">
+                    <i class="fas fa-folder-open mr-2"></i>瀏覽並設定目標
+                </button>
+
+                <div id="target-status-content" class="flex-grow flex items-center justify-center">
+                    <p class="text-[10px] text-slate-600 italic text-center">等待選取中</p>
+                </div>
+            </section>
+
+            <!-- 區塊 3: 分析結果 -->
+            <section class="flex flex-col h-full">
+                <div id="save-section" class="hidden glass p-8 rounded-[2.5rem] border-emerald-500/10 h-full flex flex-col">
+                    <h2 class="text-xs font-black text-emerald-400 mb-6 uppercase tracking-widest">分析結果寫入</h2>
+                    <textarea id="ai-output-content" class="w-full bg-slate-900/40 border border-slate-800 rounded-2xl p-5 text-[11px] focus:ring-1 focus:ring-emerald-500 outline-none mb-6 flex-grow custom-scrollbar leading-relaxed" placeholder="請將 AI 生成的 Markdown 報告貼在此處..."></textarea>
+                    <button id="save-btn" onclick="saveToGoogleDoc()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-5 rounded-2xl text-white font-black transition-all text-xs shadow-xl shadow-emerald-900/20">
+                        確認寫入雲端文件
+                    </button>
+                </div>
+                
+                <div id="save-placeholder" class="glass p-12 rounded-[2.5rem] flex flex-col items-center justify-center text-center opacity-30 h-full">
+                    <i class="fas fa-lock text-4xl mb-6 text-slate-800"></i>
+                    <p class="text-xs text-slate-600 font-bold uppercase tracking-widest">鎖定中<br><span class="text-[10px] font-normal mt-2 block">請先設定目標文件</span></p>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- 刪除方式選擇 Modal -->
+    <div id="delete-choice-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden flex items-center justify-center p-4">
+        <div class="glass p-8 rounded-[2rem] max-w-sm w-full border-indigo-500/20">
+            <div class="text-indigo-500 text-3xl mb-4 text-center"><i class="fas fa-question-circle"></i></div>
+            <h3 class="text-white text-lg font-bold text-center mb-2">要如何移除此影片？</h3>
+            <p id="modal-video-name" class="text-slate-200 text-sm font-bold text-center mb-1 truncate"></p>
+            <p class="text-slate-400 text-xs text-center mb-6 leading-relaxed">請選擇移除方式</p>
+            <div class="flex flex-col gap-3">
+                <button onclick="removeOnlyFromList()" class="w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl text-xs font-bold transition">僅從清單移除 (保留雲端檔案)</button>
+                <button onclick="executeDeleteFromDrive()" class="w-full bg-red-600 hover:bg-red-500 text-white py-3 rounded-xl text-xs font-bold transition">同步刪除雲端原始檔</button>
+                <button onclick="closeModal()" class="w-full text-slate-500 text-[10px] mt-2">取消操作</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="fixed inset-0 bg-black/60 z-[200] hidden flex flex-col items-center justify-center">
+        <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+        <p id="loading-text" class="text-white text-[10px] font-bold mt-4 tracking-widest uppercase"></p>
+    </div>
+
+</body>
+</html>
