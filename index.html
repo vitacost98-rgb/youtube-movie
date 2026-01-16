@@ -66,7 +66,7 @@
             tokenClient.requestAccessToken({ prompt: 'select_account' });
         }
 
-        // --- 影片選取功能 ---
+        // --- 1. 影片選取與管理功能 ---
 
         function createVideoPicker() {
             const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
@@ -102,27 +102,27 @@
 
         function renderSelectedList() {
             const container = document.getElementById('selected-files-list');
-            const step2Result = document.getElementById('step-1-result-area');
+            const step1Result = document.getElementById('step-1-result-area');
             
             if (selectedVideoNames.length === 0) {
                 container.innerHTML = `<p class="text-[10px] text-slate-500 italic">尚未選取影片</p>`;
-                step2Result.classList.add('hidden');
+                step1Result.classList.add('hidden');
                 return;
             }
 
-            step2Result.classList.remove('hidden');
+            step1Result.classList.remove('hidden');
             container.innerHTML = selectedVideoNames.map((name, idx) => `
                 <div class="bg-slate-800/60 p-2 rounded-lg border border-slate-700 text-xs text-slate-300 flex justify-between items-center group">
                     <span class="truncate pr-2"><i class="fas fa-video mr-2 text-emerald-500/70"></i>${name}</span>
                     <button onclick="removeVideo(${idx})" class="text-slate-500 hover:text-red-400 transition-colors">
-                        <i class="fas fa-times-circle"></i>
+                        <i class="fas fa-trash-alt"></i>
                     </button>
                 </div>
             `).join('');
             document.getElementById('raw-names').value = selectedVideoNames.join('\n');
         }
 
-        // --- 目標位置選取與建立功能 ---
+        // --- 2. 目標位置選取與建立功能 ---
 
         function manualSelectTarget() {
             // 允許選取文件與資料夾
@@ -148,7 +148,7 @@
                 if (item.mimeType === 'application/vnd.google-apps.folder') {
                     // 選取的是資料夾
                     currentSelectedFolderId = item.id;
-                    targetDocId = null; // 清空先前選取的文件
+                    targetDocId = null; 
                     
                     statusEl.innerHTML = `
                         <div class="bg-blue-500/10 p-4 rounded-xl border border-blue-500/30">
@@ -164,6 +164,7 @@
                         </div>
                     `;
                     document.getElementById('save-section').classList.add('hidden');
+                    document.getElementById('save-placeholder').classList.remove('hidden');
                 } else {
                     // 選取的是文件
                     targetDocId = item.id;
@@ -175,6 +176,7 @@
                         </div>
                     `;
                     document.getElementById('save-section').classList.remove('hidden');
+                    document.getElementById('save-placeholder').classList.add('hidden');
                 }
             }
         }
@@ -202,6 +204,7 @@
                     </div>
                 `;
                 document.getElementById('save-section').classList.remove('hidden');
+                document.getElementById('save-placeholder').classList.add('hidden');
             } catch (e) { alert("文件建立失敗：" + e.message); }
         }
 
@@ -218,13 +221,13 @@
                     fields: 'id, name'
                 });
                 currentSelectedFolderId = resp.result.id;
-                // 更新狀態為新建立的資料夾
+                // 更新顯示為新的資料夾
                 handleTargetSelection({ action: 'picked', docs: [{ id: resp.result.id, name: resp.result.name, mimeType: 'application/vnd.google-apps.folder' }] });
-                alert(`資料夾「${name}」建立成功。`);
+                alert(`子資料夾「${name}」建立成功。`);
             } catch (e) { alert("資料夾建立失敗：" + e.message); }
         }
 
-        // --- 寫入內容功能 ---
+        // --- 3. 寫入內容功能 ---
 
         async function saveToGoogleDoc() {
             const content = document.getElementById('ai-output-content').value;
@@ -248,7 +251,7 @@
                     }
                 });
                 alert("內容已成功追加至 Google 文件末尾！");
-                document.getElementById('ai-output-content').value = ""; // 清空輸入框
+                document.getElementById('ai-output-content').value = ""; 
             } catch (e) { alert("存檔失敗：" + e.message); } finally {
                 btn.disabled = false;
                 btn.innerText = "確認存檔 (追加至文件末尾)";
@@ -288,7 +291,7 @@
         <header class="flex flex-col md:flex-row justify-between items-center glass-card p-6 rounded-3xl gap-4">
             <div class="text-center md:text-left">
                 <h1 class="text-2xl font-black accent-gradient bg-clip-text text-transparent">YouTube 深度研究員</h1>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mt-1">獨立選取位置 • 智慧文件管理 • AI 成果自動同步</p>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mt-1">選取流程獨立 • 資料夾管理強化 • AI 成果同步</p>
             </div>
             <div id="auth-status">
                 <button onclick="handleAuthClick()" class="bg-indigo-600 hover:bg-indigo-500 px-6 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-900/20">
@@ -298,17 +301,17 @@
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- 左側：影片管理區 -->
+            <!-- 1. 影片管理區 -->
             <div class="space-y-6">
-                <section class="glass-card p-6 rounded-3xl h-full">
+                <section class="glass-card p-6 rounded-3xl h-full flex flex-col">
                     <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-indigo-400">
                         <i class="fas fa-film"></i> 1. 影片檔案管理
                     </h2>
                     <button onclick="createVideoPicker()" disabled class="auth-required opacity-50 w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl border border-slate-700 transition text-xs font-bold mb-4">
-                        <i class="fas fa-plus mr-2"></i>選取/增加影片
+                        <i class="fas fa-plus mr-2"></i>選取影片 (可累加)
                     </button>
                     
-                    <div id="selected-files-list" class="space-y-2 max-h-64 overflow-y-auto custom-scrollbar mb-4">
+                    <div id="selected-files-list" class="space-y-2 max-h-64 overflow-y-auto custom-scrollbar mb-4 flex-grow">
                         <p class="text-[10px] text-slate-500 italic">尚未選取影片</p>
                     </div>
 
@@ -321,63 +324,48 @@
                 </section>
             </div>
 
-            <!-- 中間：儲存位置區 -->
+            <!-- 2. 儲存位置區 -->
             <div class="space-y-6">
                 <section class="glass-card p-6 rounded-3xl h-full">
                     <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-cyan-400">
                         <i class="fas fa-hdd"></i> 2. 設定儲存位置
                     </h2>
-                    <p class="text-[10px] text-slate-400 mb-4 leading-relaxed">您可以直接選取現有文件，或是選取資料夾後點擊「新增」來建立。此操作與影片選取互不干擾。</p>
+                    <p class="text-[10px] text-slate-400 mb-4 leading-relaxed">您可以直接選取文件，或選取資料夾後在此處「新增文件」。</p>
                     
                     <button onclick="manualSelectTarget()" disabled class="auth-required opacity-50 w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl border border-slate-700 transition text-xs font-bold mb-6">
-                        <i class="fas fa-search-location mr-2"></i>瀏覽雲端硬碟
+                        <i class="fas fa-search-location mr-2"></i>瀏覽並選取位置
                     </button>
 
                     <div id="target-status-content" class="space-y-4">
-                        <p class="text-[10px] text-slate-500 italic text-center">請先選取目標位置</p>
+                        <p class="text-[10px] text-slate-500 italic text-center">尚未選取目標</p>
                     </div>
                 </section>
             </div>
 
-            <!-- 右側：存檔區 -->
+            <!-- 3. 匯入內容區 -->
             <div class="space-y-6">
-                <section id="save-section" class="hidden glass-card p-6 rounded-3xl border-emerald-500/20">
+                <section id="save-section" class="hidden glass-card p-6 rounded-3xl border-emerald-500/20 h-full">
                     <h2 class="text-sm font-bold mb-4 flex items-center gap-2 text-emerald-400">
-                        <i class="fas fa-file-export"></i> 3. 匯入內容
+                        <i class="fas fa-file-export"></i> 3. 匯入分析結果
                     </h2>
-                    <textarea id="ai-output-content" rows="12" class="w-full bg-slate-900/50 border border-slate-700 rounded-2xl p-4 text-[11px] focus:ring-1 focus:ring-emerald-500 outline-none mb-4 custom-scrollbar" placeholder="在此貼上 AI 產出的 Markdown 詳細內容..."></textarea>
+                    <textarea id="ai-output-content" rows="12" class="w-full bg-slate-900/50 border border-slate-700 rounded-2xl p-4 text-[11px] focus:ring-1 focus:ring-emerald-500 outline-none mb-4 custom-scrollbar" placeholder="在此貼上分析好的 Markdown 內容..."></textarea>
                     <button id="save-btn" onclick="saveToGoogleDoc()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-xl font-bold transition-all text-sm shadow-lg shadow-emerald-900/20">
-                        確認存檔 (追加至文件)
+                        確認存檔 (追加內容)
                     </button>
-                    <p class="mt-4 text-[9px] text-slate-500 text-center italic">內容將被追加到所選 Google 文件的最末端</p>
+                    <p class="mt-4 text-[9px] text-slate-500 text-center italic">內容將被自動追加至目標文件的末端</p>
                 </section>
                 
-                <div id="save-placeholder" class="glass-card p-6 rounded-3xl flex flex-col items-center justify-center text-center opacity-40 py-12">
+                <div id="save-placeholder" class="glass-card p-6 rounded-3xl flex flex-col items-center justify-center text-center opacity-40 py-12 h-full">
                     <i class="fas fa-lock text-3xl mb-4 text-slate-600"></i>
-                    <p class="text-xs text-slate-500">請先完成步驟 2<br>選取一個「目標文件」以開啟存檔功能</p>
+                    <p class="text-xs text-slate-500">請先完成步驟 2<br>選取一個「目標文件」</p>
                 </div>
             </div>
         </div>
     </div>
 
     <footer class="mt-8 text-center text-slate-600 text-[10px] uppercase tracking-tighter">
-        穩定運行中 • 支援多選與即時刪除 • 已獲取 Drive.File 操作權限
+        穩定運行中 • 支援單項刪除 • 已獲取 Google Drive 全面權限
     </footer>
 
-    <script>
-        // 切換存檔區域顯示邏輯
-        const observer = new MutationObserver(() => {
-            const saveSection = document.getElementById('save-section');
-            const placeholder = document.getElementById('save-placeholder');
-            if (targetDocId) {
-                saveSection.classList.remove('hidden');
-                placeholder.classList.add('hidden');
-            } else {
-                saveSection.classList.add('hidden');
-                placeholder.classList.remove('hidden');
-            }
-        });
-        observer.observe(document.getElementById('target-status-content'), { childList: true });
-    </script>
 </body>
 </html>
